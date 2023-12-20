@@ -11,6 +11,10 @@ data:
     }
 
     http {
+        upstream dashboard {
+            server localhost:80;
+        }
+
         upstream api {
             server localhost:8000;
         }
@@ -23,8 +27,18 @@ data:
             # index index.html index.htm;
             server_tokens off;
 
-            ssl_certificate /etc/nginx/selfsigned.crt;
-            ssl_certificate_key /etc/nginx/selfsigned.key;
+            ssl_certificate /etc/nginx/media/selfsigned.crt;
+            ssl_certificate_key /etc/nginx/media/selfsigned.key;
+
+            location /dashboard/ {
+                proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;
+                proxy_set_header X-Forwarded-Proto https;
+                proxy_set_header X-Forwarded-Ssl on;
+                proxy_set_header Host $http_host;
+                proxy_redirect off;
+                proxy_pass http://dashboard;
+                proxy_cookie_path / "/; HTTPOnly; Secure";
+            }
 
             location / {
                 proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;
@@ -40,7 +54,7 @@ data:
   setup.sh: |
     #!/bin/sh
 
-    openssl req -new -newkey rsa:4096 -days 365 -nodes -x509 -subj "/C=US/ST=Denial/L=Springfield/O=Dis/CN=localhost" -keyout /etc/nginx/selfsigned.key -out /etc/nginx/selfsigned.crt
+    openssl req -new -newkey rsa:4096 -days 365 -nodes -x509 -subj "/C=US/ST=Denial/L=Springfield/O=Dis/CN=localhost" -keyout /etc/nginx/ssl/selfsigned.key -out /etc/nginx/ssl/selfsigned.crt
   replica_user.sql: |
     -- Script being executed on DB init, creates read only user
     -- for replicas purposes.
@@ -59,12 +73,12 @@ data:
   DEFAULT_CHANNEL_SLUG: default-channel
   # Note: recommended value is False for production usage,
   # refer to documentation for more details.
-  HTTP_IP_FILTER_ALLOW_LOOPBACK_IPS: "True"
+  HTTP_IP_FILTER_ALLOW_LOOPBACK_IPS: 'True'
   # https://docs.saleor.io/docs/3.x/setup/configuration#http_ip_filter_enabled
   # Set to False to enable local apps development using docker host
   # Read more: https://docs.saleor.io/docs/3.x/developer/extending/apps/local-app-development
   # Note: recommended value for production is True
-  HTTP_IP_FILTER_ENABLED: "True"
+  HTTP_IP_FILTER_ENABLED: 'True'
 
 ---
 apiVersion: v1
@@ -91,23 +105,24 @@ data:
 apiVersion: apps/v1
 kind: Deployment
 metadata:
-  name: saleur-db
+  name: saleor-db
 spec:
   replicas: 1
   selector:
     matchLabels:
-      app: saleur-db
+      app: saleor-db
   template:
     metadata:
       labels:
-        app: saleur-db
+        app: saleor-db
     spec:
       # restartPolicy: OnFailure
       containers:
       - name: db
         image: library/postgres:13-alpine
         ports:
-        - containerPort: 5432
+        - name: db
+          containerPort: 5432
         # restartPolicy: OnFailure
         volumeMounts:
         - name: saleor-db
@@ -123,8 +138,8 @@ spec:
           value: saleor
         resources:
           limits:
-            cpu: "125m"
-            memory: "128Mi"
+            cpu: '125m'
+            memory: '256Mi'
       volumes:
       - name: sql-conf
         configMap:
@@ -137,88 +152,168 @@ spec:
           sizeLimit: 500Mi
 
 ---
+apiVersion: v1
+kind: Service
+metadata:
+  name: db
+  labels:
+    app: saleor-db
+spec:
+  selector:
+    app: saleor-db
+  ports:
+  - name: db
+    port: 5432
+    protocol: TCP
+    targetPort: 5432
+
+---
 apiVersion: apps/v1
 kind: Deployment
 metadata:
-  name: saleur-redis
+  name: saleor-redis
 spec:
   replicas: 1
   selector:
     matchLabels:
-      app: saleur-redis
+      app: saleor-redis
   template:
     metadata:
       labels:
-        app: saleur-redis
+        app: saleor-redis
     spec:
       # restartPolicy: OnFailure
       containers:
       - name: redis
         image: library/redis:7.0-alpine
         ports:
-        - containerPort: 6379
+        - name: redis
+          containerPort: 6379
         # restartPolicy: OnFailure
         volumeMounts:
         - name: saleor-redis
           mountPath: /data
         resources:
           limits:
-            cpu: "125m"
-            memory: "128Mi"
+            cpu: '12m'
+            memory: '16Mi'
       volumes:
       - name: saleor-redis
         emptyDir:
           sizeLimit: 500Mi
 
 ---
+apiVersion: v1
+kind: Service
+metadata:
+  name: redis
+  labels:
+    app: saleor-redis
+spec:
+  selector:
+    app: saleor-redis
+  ports:
+  - name: redis
+    port: 6379
+    protocol: TCP
+    targetPort: 6379
+
+---
 apiVersion: apps/v1
 kind: Deployment
 metadata:
-  name: saleur-jaeger
+  name: saleor-jaeger
 spec:
   replicas: 1
   selector:
     matchLabels:
-      app: saleur-jaeger
+      app: saleor-jaeger
   template:
     metadata:
       labels:
-        app: saleur-jaeger
+        app: saleor-jaeger
     spec:
       # restartPolicy: OnFailure
       containers:
       - name: jaeger
         image: jaegertracing/all-in-one
         ports:
-        - containerPort: 5775
+        - name: zipkin-thrift
+          containerPort: 5775
           protocol: UDP
-        - containerPort: 6831
+        - name: thrift-compact
+          containerPort: 6831
           protocol: UDP
-        - containerPort: 6832
+        - name: thrift-binary
+          containerPort: 6832
           protocol: UDP
-        - containerPort: 5778
-        - containerPort: 16686
-        - containerPort: 14268
-        - containerPort: 9411
+        - name: configs
+          containerPort: 5778
+        - name: frontend
+          containerPort: 16686
+        - name: thrift-directly
+          containerPort: 14268
+        - name: zipkin
+          containerPort: 9411
         resources:
           limits:
-            cpu: "125m"
-            memory: "128Mi"
+            cpu: '12m'
+            memory: '16Mi'
+
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: jaeger
+  labels:
+    app: saleor-jaeger
+spec:
+  selector:
+    app: saleor-jaeger
+  ports:
+  - name: zipkin-thrift
+    port: 5775
+    protocol: UDP
+    targetPort: 5775
+  - name: thrift-compact
+    port: 6831
+    protocol: UDP
+    targetPort: 6831
+  - name: thrift-binary
+    port: 6832
+    protocol: UDP
+    targetPort: 6832
+  - name: configs
+    port: 5778
+    protocol: TCP
+    targetPort: 5778
+  - name: frontend
+    port: 16686
+    protocol: TCP
+    targetPort: 16686
+  - name: thrift-directly
+    port: 14268
+    protocol: TCP
+    targetPort: 14268
+  - name: zipkin
+    port: 9411
+    protocol: TCP
+    targetPort: 9411
 
 ---
 apiVersion: apps/v1
 kind: Deployment
 metadata:
-  name: saleur-mailpit
+  name: saleor-mailpit
 spec:
   replicas: 1
   selector:
     matchLabels:
-      app: saleur-mailpit
+      app: saleor-mailpit
   template:
     metadata:
       labels:
-        app: saleur-mailpit
+        app: saleor-mailpit
     spec:
       # restartPolicy: OnFailure
       containers:
@@ -232,19 +327,19 @@ spec:
         # restartPolicy: OnFailure
         resources:
           limits:
-            cpu: "125m"
-            memory: "128Mi"
+            cpu: '12m'
+            memory: '16Mi'
 
 ---
 apiVersion: v1
 kind: Service
 metadata:
-  name: saleur-mailpit
+  name: mailpit
+  labels:
+    app: saleor-mailpit
 spec:
-  type: ExternalName
-  externalName: mailpit
   selector:
-    app: saleur-mailpit
+    app: saleor-mailpit
   ports:
   - name: smtp
     port: 1025
@@ -259,18 +354,41 @@ spec:
 apiVersion: apps/v1
 kind: Deployment
 metadata:
-  name: saleur-platform
+  name: saleor-platform
 spec:
   replicas: 1
   selector:
     matchLabels:
-      app: saleur-platform
+      app: saleor-platform
   template:
     metadata:
       labels:
-        app: saleur-platform
+        app: saleor-platform
     spec:
       # restartPolicy: OnFailure
+      initContainers:
+      - name: init-db
+        image: busybox:1.28
+        command: ['sh', '-c', 'for i in {1..100}; do sleep 1; if nslookup db; then exit 0; fi; done; exit 1']
+      - name: init-redis
+        image: busybox:1.28
+        command: ['sh', '-c', 'for i in {1..100}; do sleep 1; if nslookup redis; then exit 0; fi; done; exit 1']
+      - name: init-jaeger
+        image: busybox:1.28
+        command: ['sh', '-c', 'for i in {1..100}; do sleep 1; if nslookup jaeger; then exit 0; fi; done; exit 1']
+      - name: init-mailpit
+        image: busybox:1.28
+        command: ['sh', '-c', 'for i in {1..100}; do sleep 1; if nslookup mailpit; then exit 0; fi; done; exit 1']
+      - name: create-ssl
+        image: nginx:latest
+        command: ['/setup.sh']
+        volumeMounts:
+        - name: setup-sh
+          mountPath: /setup.sh
+          subPath: setup.sh
+          readOnly: true
+        - name: nginx-ssl
+          mountPath: /etc/nginx/ssl
       containers:
       - name: nginx
         image: nginx:latest
@@ -282,18 +400,21 @@ spec:
           mountPath: /etc/nginx/nginx.conf
           subPath: nginx.conf
           readOnly: true
-        - name: nginx-conf
-          mountPath: /docker-entrypoint.d/setup.sh
-          subPath: setup.sh
-          readOnly: true
+        - name: nginx-ssl
+          mountPath: /etc/nginx/ssl
+        # - name: nginx-conf
+        #   mountPath: /docker-entrypoint.d/setup.sh
+        #   subPath: setup.sh
+        #   readOnly: true
         resources:
           limits:
-            cpu: "125m"
-            memory: "128Mi"
+            cpu: '12m'
+            memory: '16Mi'
       - name: api
         image: ghcr.io/saleor/saleor:3.18
         ports:
-        - containerPort: 8000
+        - name: api
+          containerPort: 8000
         # restartPolicy: OnFailure
         stdin: true
         tty: true
@@ -311,13 +432,15 @@ spec:
         - name: JAEGER_AGENT_HOST
           value: jaeger
         - name: DASHBOARD_URL
-          value: http://localhost:80/
+          value: https://api.shop.kfkasimir.dk/dashboard/
         - name: ALLOWED_HOSTS
-          value: localhost
+          value: localhost,api.shop.kfkasimir.dk,192.168.200.11
+        # - name: RSA_PRIVATE_KEY
+        #   value: /app/media/selfsigned.key
         resources:
           limits:
-            cpu: "125m"
-            memory: "128Mi"
+            cpu: '500m'
+            memory: '1024Mi'
       - name: dashboard
         image: ghcr.io/saleor/saleor-dashboard:latest
         ports:
@@ -326,11 +449,11 @@ spec:
         # restartPolicy: OnFailure
         resources:
           limits:
-            cpu: "125m"
-            memory: "128Mi"
+            cpu: '12m'
+            memory: '16Mi'
       - name: worker
         image: ghcr.io/saleor/saleor:3.18
-        command: ["celery", "-A", "saleor", "--app=saleor.celeryconf:app", "worker", "--loglevel=info", "-B"]
+        command: ['celery', '-A', 'saleor', '--app=saleor.celeryconf:app', 'worker', '--loglevel=info', '-B']
         envFrom:
         - configMapRef:
             name: common-env
@@ -343,8 +466,8 @@ spec:
           mountPath: /app/media
         resources:
           limits:
-            cpu: "125m"
-            memory: "128Mi"
+            cpu: '375m'
+            memory: '896Mi'
       volumes:
       - name: nginx-conf
         configMap:
@@ -352,28 +475,35 @@ spec:
           items:
           - key: nginx.conf
             path: nginx.conf
+      - name: setup-sh
+        configMap:
+          name: platform-conf
+          items:
           - key: setup.sh
             path: setup.sh
             mode: 0755
       - name: saleor-media
         emptyDir:
           sizeLimit: 500Mi
+      - name: nginx-ssl
+        emptyDir:
+          sizeLimit: 10Mi
 
 ---
 apiVersion: v1
 kind: Service
 metadata:
-  name: saleur-platform
+  name: saleor-platform
 spec:
   type: NodePort
   selector:
-    app: saleur-platform
+    app: saleor-platform
   ports:
-  - name: dashboard
-    port: 80
-    protocol: TCP
-    targetPort: 80
-    nodePort: 30002
+  # - name: dashboard
+  #   port: 80
+  #   protocol: TCP
+  #   targetPort: 80
+  #   nodePort: 30002
   - name: nginx
     port: 443
     protocol: TCP
