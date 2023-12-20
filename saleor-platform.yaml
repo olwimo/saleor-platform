@@ -99,7 +99,7 @@ metadata:
 type: Opaque
 data:
   # SECRET_KEY: changeme
-  SECRET_KEY: Y2hhbmdlbWUK
+  SECRET_KEY: Y2hhbmdlbWUK==
 
 ---
 apiVersion: apps/v1
