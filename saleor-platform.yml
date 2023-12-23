@@ -1,0 +1,577 @@
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: platform-conf
+data:
+  nginx.conf: |
+    user nginx;
+    worker_processes 1;
+    events {
+      worker_connections 10240;
+    }
+
+    http {
+        upstream dashboard {
+            server localhost:80;
+        }
+
+        upstream api {
+            server localhost:8000;
+        }
+
+        server {
+            listen 443 ssl;
+
+            server_name localhost;
+            root /usr/share/nginx/html;
+            # index index.html index.htm;
+            server_tokens off;
+
+            ssl_certificate /etc/nginx/ssl/selfsigned.crt;
+            ssl_certificate_key /etc/nginx/ssl/selfsigned.key;
+
+            location /dashboard/ {
+                proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;
+                proxy_set_header X-Forwarded-Proto https;
+                proxy_set_header X-Forwarded-Ssl on;
+                proxy_set_header Host $http_host;
+                proxy_redirect off;
+                proxy_pass http://dashboard/dashboard/;
+                proxy_cookie_path / "/; HTTPOnly; Secure";
+            }
+
+            location /media/ {
+                try_files $uri $uri/ =404;
+            }
+
+            location / {
+                proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;
+                proxy_set_header X-Forwarded-Proto https;
+                proxy_set_header X-Forwarded-Ssl on;
+                proxy_set_header Host $http_host;
+                proxy_redirect off;
+                proxy_pass http://api/;
+                proxy_cookie_path / "/; HTTPOnly; Secure";
+            }
+        }
+    }
+  99-setup.sh: |
+    #!/bin/sh
+
+    mkdir -p /etc/nginx/ssl
+    openssl req -new -newkey rsa:4096 -days 365 -nodes -x509 -subj "/C=US/ST=Denial/L=Springfield/O=Dis/CN=localhost" -keyout /etc/nginx/ssl/selfsigned.key -out /etc/nginx/ssl/selfsigned.crt
+  api-setup.sh: |
+    #!/bin/sh
+
+    cd /app
+    python3 manage.py migrate
+    python3 manage.py populatedb
+    # python3 manage.py createsuperuser
+  replica_user.sql: |
+    -- Script being executed on DB init, creates read only user
+    -- for replicas purposes.
+    CREATE USER saleor_read_only WITH PASSWORD 'saleor';
+    GRANT CONNECT ON DATABASE saleor TO saleor_read_only;
+    GRANT USAGE ON SCHEMA public TO saleor_read_only;
+    GRANT SELECT ON ALL TABLES IN SCHEMA public TO saleor_read_only;
+    ALTER DEFAULT PRIVILEGES IN SCHEMA public GRANT SELECT ON TABLES TO saleor_read_only;
+
+---
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: common-env
+data:
+  DEFAULT_CHANNEL_SLUG: default-channel
+  # Note: recommended value is False for production usage,
+  # refer to documentation for more details.
+  HTTP_IP_FILTER_ALLOW_LOOPBACK_IPS: 'False'
+  # https://docs.saleor.io/docs/3.x/setup/configuration#http_ip_filter_enabled
+  # Set to False to enable local apps development using docker host
+  # Read more: https://docs.saleor.io/docs/3.x/developer/extending/apps/local-app-development
+  # Note: recommended value for production is True
+  HTTP_IP_FILTER_ENABLED: 'True'
+
+---
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: backend-env
+data:
+  CELERY_BROKER_URL: redis://redis:6379/1
+  DATABASE_URL: postgres://saleor:saleor@db/saleor
+  DEFAULT_FROM_EMAIL: it@kfkasimir.dk
+  EMAIL_URL: smtp://mailpit:1025
+  ALLOWED_CLIENT_HOSTS: localhost,api.shop.kfkasimir.dk,192.168.200.11
+  REDIS_URL: redis://redis:6379/0
+  DEBUG: 'False'
+  DEFAULT_COUNTRY: DK
+  DEFAULT_CURRENCY: DKK
+  PUBLIC_URL: https://api.shop.kfkasimir.dk/
+  PLAYGROUND_ENABLED: 'True'
+  JAEGER_AGENT_HOST: jaeger
+  DASHBOARD_URL: https://api.shop.kfkasimir.dk/dashboard/
+  ALLOWED_HOSTS: localhost,api.shop.kfkasimir.dk,192.168.200.11
+
+# ---
+# apiVersion: v1
+# kind: Secret
+# metadata:
+#   name: secret-key
+# type: Opaque
+# data:
+#   # SECRET_KEY: changeme
+#   SECRET_KEY: Y2hhbmdlbWUK==
+#   RSA_PRIVATE_KEY: |
+#     -----BEGIN PRIVATE KEY-----
+#     ...
+#     -----END PRIVATE KEY-----
+
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: saleor-db
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: saleor-db
+  template:
+    metadata:
+      labels:
+        app: saleor-db
+    spec:
+      # restartPolicy: OnFailure
+      containers:
+      - name: db
+        image: library/postgres:13-alpine
+        ports:
+        - name: db
+          containerPort: 5432
+        # restartPolicy: OnFailure
+        volumeMounts:
+        - name: saleor-db
+          mountPath: /var/lib/postgresql/data
+        - name: sql-conf
+          mountPath: /docker-entrypoint-initdb.d/replica_user.sql
+          subPath: replica_user.sql
+          readOnly: true
+        env:
+        - name: POSTGRES_USER
+          value: saleor
+        - name: POSTGRES_PASSWORD
+          value: saleor
+        resources:
+          limits:
+            cpu: '125m'
+            memory: '256Mi'
+      volumes:
+      - name: sql-conf
+        configMap:
+          name: platform-conf
+          items:
+          - key: replica_user.sql
+            path: replica_user.sql
+      - name: saleor-db
+        emptyDir:
+          sizeLimit: 500Mi
+
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: db
+  labels:
+    app: saleor-db
+spec:
+  selector:
+    app: saleor-db
+  ports:
+  - name: db
+    port: 5432
+    protocol: TCP
+    targetPort: 5432
+
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: saleor-redis
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: saleor-redis
+  template:
+    metadata:
+      labels:
+        app: saleor-redis
+    spec:
+      # restartPolicy: OnFailure
+      containers:
+      - name: redis
+        image: library/redis:7.0-alpine
+        ports:
+        - name: redis
+          containerPort: 6379
+        # restartPolicy: OnFailure
+        volumeMounts:
+        - name: saleor-redis
+          mountPath: /data
+        resources:
+          limits:
+            cpu: '12m'
+            memory: '16Mi'
+      volumes:
+      - name: saleor-redis
+        emptyDir:
+          sizeLimit: 500Mi
+
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: redis
+  labels:
+    app: saleor-redis
+spec:
+  selector:
+    app: saleor-redis
+  ports:
+  - name: redis
+    port: 6379
+    protocol: TCP
+    targetPort: 6379
+
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: saleor-jaeger
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: saleor-jaeger
+  template:
+    metadata:
+      labels:
+        app: saleor-jaeger
+    spec:
+      # restartPolicy: OnFailure
+      containers:
+      - name: jaeger
+        image: jaegertracing/all-in-one
+        ports:
+        - name: zipkin-thrift
+          containerPort: 5775
+          protocol: UDP
+        - name: thrift-compact
+          containerPort: 6831
+          protocol: UDP
+        - name: thrift-binary
+          containerPort: 6832
+          protocol: UDP
+        - name: configs
+          containerPort: 5778
+        - name: frontend
+          containerPort: 16686
+        - name: thrift-directly
+          containerPort: 14268
+        - name: zipkin
+          containerPort: 9411
+        resources:
+          limits:
+            cpu: '12m'
+            memory: '16Mi'
+
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: jaeger
+  labels:
+    app: saleor-jaeger
+spec:
+  selector:
+    app: saleor-jaeger
+  ports:
+  - name: zipkin-thrift
+    port: 5775
+    protocol: UDP
+    targetPort: 5775
+  - name: thrift-compact
+    port: 6831
+    protocol: UDP
+    targetPort: 6831
+  - name: thrift-binary
+    port: 6832
+    protocol: UDP
+    targetPort: 6832
+  - name: configs
+    port: 5778
+    protocol: TCP
+    targetPort: 5778
+  - name: frontend
+    port: 16686
+    protocol: TCP
+    targetPort: 16686
+  - name: thrift-directly
+    port: 14268
+    protocol: TCP
+    targetPort: 14268
+  - name: zipkin
+    port: 9411
+    protocol: TCP
+    targetPort: 9411
+
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: saleor-mailpit
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: saleor-mailpit
+  template:
+    metadata:
+      labels:
+        app: saleor-mailpit
+    spec:
+      # restartPolicy: OnFailure
+      containers:
+      - name: mailpit
+        image: axllent/mailpit
+        ports:
+        - name: smtp
+          containerPort: 1025
+        - name: webui
+          containerPort: 8025
+        # restartPolicy: OnFailure
+        resources:
+          limits:
+            cpu: '12m'
+            memory: '16Mi'
+
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: mailpit
+  labels:
+    app: saleor-mailpit
+spec:
+  selector:
+    app: saleor-mailpit
+  ports:
+  - name: smtp
+    port: 1025
+    protocol: TCP
+    targetPort: 1025
+  - name: webui
+    port: 8025
+    protocol: TCP
+    targetPort: 8025
+
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: saleor-platform
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: saleor-platform
+  template:
+    metadata:
+      labels:
+        app: saleor-platform
+    spec:
+      # restartPolicy: OnFailure
+      initContainers:
+      - name: init-db
+        image: busybox:1.28
+        command: ['sh', '-c', 'for i in {1..100}; do sleep 1; if nslookup db; then exit 0; fi; done; exit 1']
+      - name: init-redis
+        image: busybox:1.28
+        command: ['sh', '-c', 'for i in {1..100}; do sleep 1; if nslookup redis; then exit 0; fi; done; exit 1']
+      - name: init-jaeger
+        image: busybox:1.28
+        command: ['sh', '-c', 'for i in {1..100}; do sleep 1; if nslookup jaeger; then exit 0; fi; done; exit 1']
+      - name: init-mailpit
+        image: busybox:1.28
+        command: ['sh', '-c', 'for i in {1..100}; do sleep 1; if nslookup mailpit; then exit 0; fi; done; exit 1']
+      # - name: create-ssl
+      #   image: nginx:latest
+      #   command: ['/setup.sh']
+      #   volumeMounts:
+      #   - name: setup-sh
+      #     mountPath: /setup.sh
+      #     subPath: setup.sh
+      #     readOnly: true
+      #   - name: nginx-ssl
+      #     mountPath: /etc/nginx/ssl
+      - name: api-setup
+        image: ghcr.io/saleor/saleor:3.18
+        command: ['/api-setup.sh']
+        stdin: true
+        tty: true
+        volumeMounts:
+        - name: saleor-media
+          mountPath: /app/media
+        - name: api-setup
+          mountPath: /api-setup.sh
+          subPath: api-setup.sh
+          readOnly: true
+        envFrom:
+        - configMapRef:
+            name: common-env
+        - configMapRef:
+            name: backend-env
+        - secretRef:
+            name: secret-key
+        # env:
+        # - name: JAEGER_AGENT_HOST
+        #   value: jaeger
+        # - name: DASHBOARD_URL
+        #   value: https://api.shop.kfkasimir.dk/dashboard/
+        # - name: ALLOWED_HOSTS
+        #   value: localhost,api.shop.kfkasimir.dk,192.168.200.11
+      containers:
+      - name: nginx
+        image: nginx:latest
+        ports:
+        - name: nginx
+          containerPort: 443
+        volumeMounts:
+        - name: nginx-conf
+          mountPath: /etc/nginx/nginx.conf
+          subPath: nginx.conf
+          readOnly: true
+        - name: nginx-conf
+          mountPath: /docker-entrypoint.d/99-setup.sh
+          subPath: 99-setup.sh
+          readOnly: true
+        - name: saleor-media
+          mountPath: /usr/share/nginx/html
+        # - name: nginx-conf
+        #   mountPath: /docker-entrypoint.d/setup.sh
+        #   subPath: setup.sh
+        #   readOnly: true
+        resources:
+          limits:
+            cpu: '12m'
+            memory: '16Mi'
+      - name: api
+        image: ghcr.io/saleor/saleor:3.18
+        ports:
+        - name: api
+          containerPort: 8000
+        # restartPolicy: OnFailure
+        stdin: true
+        tty: true
+        volumeMounts:
+        - name: saleor-media
+          mountPath: /app/media
+        envFrom:
+        - configMapRef:
+            name: common-env
+        - configMapRef:
+            name: backend-env
+        - secretRef:
+            name: secret-key
+        # env:
+        # - name: JAEGER_AGENT_HOST
+        #   value: jaeger
+        # - name: DASHBOARD_URL
+        #   value: https://api.shop.kfkasimir.dk/dashboard/
+        # - name: ALLOWED_HOSTS
+        #   value: localhost,api.shop.kfkasimir.dk,192.168.200.11
+        resources:
+          limits:
+            cpu: '375m'
+            memory: '896Mi'
+      - name: dashboard
+        image: ghcr.io/saleor/saleor-dashboard:latest
+        ports:
+        - name: dashboard
+          containerPort: 80
+        # restartPolicy: OnFailure
+        env:
+        # - name: API_URI
+        #   value: https://api.shop.kfkasimir.dk/graphql/
+        - name: API_URL
+          value: https://api.shop.kfkasimir.dk/graphql/
+        # - name: APP_MOUNT_URI
+        #   value: /dashboard/
+        # - name: STATIC_URL
+        #   value: https://api.shop.kfkasimir.dk/dashboard/
+        resources:
+          limits:
+            cpu: '12m'
+            memory: '16Mi'
+      - name: worker
+        image: ghcr.io/saleor/saleor:3.18
+        command: ['celery', '-A', 'saleor', '--app=saleor.celeryconf:app', 'worker', '--loglevel=info', '-B']
+        envFrom:
+        - configMapRef:
+            name: common-env
+        - configMapRef:
+            name: backend-env
+        - secretRef:
+            name: secret-key
+        volumeMounts:
+        - name: saleor-media
+          mountPath: /app/media
+        resources:
+          limits:
+            cpu: '375m'
+            memory: '896Mi'
+      volumes:
+      - name: nginx-conf
+        configMap:
+          name: platform-conf
+          items:
+          - key: nginx.conf
+            path: nginx.conf
+          - key: 99-setup.sh
+            path: 99-setup.sh
+            mode: 0755
+      - name: api-setup
+        configMap:
+          name: platform-conf
+          items:
+          - key: api-setup.sh
+            path: api-setup.sh
+            mode: 0755
+      - name: saleor-media
+        emptyDir:
+          sizeLimit: 500Mi
+      # - name: nginx-ssl
+      #   emptyDir:
+      #     sizeLimit: 10Mi
+
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: saleor-platform
+spec:
+  type: NodePort
+  selector:
+    app: saleor-platform
+  ports:
+  # - name: dashboard
+  #   port: 80
+  #   protocol: TCP
+  #   targetPort: 80
+  #   nodePort: 30002
+  - name: nginx
+    port: 443
+    protocol: TCP
+    targetPort: 443
+    nodePort: 30004

@@ -1,0 +1,142 @@
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: storefront-conf
+data:
+  nginx.conf: |
+    user nginx;
+    worker_processes 1;
+    events {
+      worker_connections 10240;
+    }
+
+    http {
+        upstream storefront {
+            server localhost:3000;
+        }
+
+        server {
+            listen 443 ssl;
+
+            server_name localhost;
+            root /usr/share/nginx/html;
+            # index index.html index.htm;
+            server_tokens off;
+
+            ssl_certificate /etc/nginx/ssl/selfsigned.crt;
+            ssl_certificate_key /etc/nginx/ssl/selfsigned.key;
+
+            # location /media/ {
+            #     try_files $uri $uri/ =404;
+            # }
+
+            location / {
+                proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;
+                proxy_set_header X-Forwarded-Proto https;
+                proxy_set_header X-Forwarded-Ssl on;
+                proxy_set_header Host $http_host;
+                proxy_redirect off;
+                proxy_pass http://storefront/;
+                proxy_cookie_path / "/; HTTPOnly; Secure";
+            }
+        }
+    }
+  99-setup.sh: |
+    #!/bin/sh
+
+    mkdir -p /etc/nginx/ssl
+    openssl req -new -newkey rsa:4096 -days 365 -nodes -x509 -subj "/C=US/ST=Denial/L=Springfield/O=Dis/CN=localhost" -keyout /etc/nginx/ssl/selfsigned.key -out /etc/nginx/ssl/selfsigned.crt
+
+# ---
+# apiVersion: v1
+# kind: ConfigMap
+# metadata:
+#   name: storefront-env
+# data:
+#   NEXT_PUBLIC_SALEOR_API_URL: https://api.shop.kfkasimir.dk/graphql/
+#   NEXT_PUBLIC_STOREFRONT_URL: https://shop.kfkasimir.dk
+
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: saleor-storefront
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: saleor-storefront
+  template:
+    metadata:
+      labels:
+        app: saleor-storefront
+    spec:
+      # restartPolicy: OnFailure
+      initContainers:
+      - name: init-platform
+        image: busybox:1.28
+        command: ['sh', '-c', 'for i in {1..100}; do sleep 1; if nslookup saleor-platform; then exit 0; fi; done; exit 1']
+      containers:
+      - name: nginx
+        image: nginx:latest
+        ports:
+        - name: nginx
+          containerPort: 443
+        volumeMounts:
+        - name: storefront-conf
+          mountPath: /etc/nginx/nginx.conf
+          subPath: nginx.conf
+          readOnly: true
+        - name: storefront-conf
+          mountPath: /docker-entrypoint.d/99-setup.sh
+          subPath: 99-setup.sh
+          readOnly: true
+        # - name: saleor-media
+        #   mountPath: /usr/share/nginx/html
+        resources:
+          limits:
+            cpu: '12m'
+            memory: '16Mi'
+      - name: storefront
+        image: olwimo/storefront:latest
+        ports:
+        - name: storefront
+          containerPort: 3000
+        env:
+        - name: PORT
+          value: '3000'
+        - name: HOSTNAME
+          value: localhost
+        # envFrom:
+        # - configMapRef:
+        #     name: storefront-env
+        resources:
+          limits:
+            cpu: '50m'
+            memory: '128Mi'
+      volumes:
+      - name: storefront-conf
+        configMap:
+          name: storefront-conf
+          items:
+          - key: nginx.conf
+            path: nginx.conf
+          - key: 99-setup.sh
+            path: 99-setup.sh
+            mode: 0755
+
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: saleor-storefront
+spec:
+  type: NodePort
+  selector:
+    app: saleor-storefront
+  ports:
+  - name: nginx
+    port: 443
+    protocol: TCP
+    targetPort: 443
+    nodePort: 30008
