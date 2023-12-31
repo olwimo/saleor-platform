@@ -640,8 +640,8 @@ spec:
           containerPort: 3000
         resources:
           limits:
-            cpu: '500m'
-            memory: '512Mi'
+            cpu: '2000m'
+            memory: '2048Mi'
 
 ---
 apiVersion: v1
@@ -723,6 +723,15 @@ spec:
       - name: router-ssl
         emptyDir:
           sizeLimit: 10Mi
+      affinity:
+        nodeAffinity:
+          requiredDuringSchedulingIgnoredDuringExecution:
+            nodeSelectorTerms:
+            - matchExpressions:
+              - key: kubernetes.io/hostname
+                operator: In
+                values:
+                - debian
 
 ---
 apiVersion: v1
