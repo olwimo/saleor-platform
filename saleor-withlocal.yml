@@ -15,6 +15,10 @@ data:
             server saleor-platform:8000;
         }
 
+        upstream media {
+            server saleor-platform:80;
+        }
+
         upstream dashboard {
             server saleor-dashboard:80;
         }
@@ -41,6 +45,16 @@ data:
                 proxy_set_header Host $http_host;
                 proxy_redirect off;
                 proxy_pass http://api;
+                proxy_cookie_path / "/; HTTPOnly; Secure";
+            }
+
+            location /media/ {
+                proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;
+                proxy_set_header X-Forwarded-Proto https;
+                proxy_set_header X-Forwarded-Ssl on;
+                proxy_set_header Host $http_host;
+                proxy_redirect off;
+                proxy_pass http://media;
                 proxy_cookie_path / "/; HTTPOnly; Secure";
             }
         }
@@ -130,6 +144,20 @@ data:
 apiVersion: v1
 kind: ConfigMap
 metadata:
+  name: saleor-dashboard-env
+data:
+  API_URI: https://api.shop.kfkasimir.dk/graphql/
+  APP_MOUNT_URI: /dashboard/
+  APPS_MARKETPLACE_API_URI: https://apps.saleor.io/api/v2/saleor-apps
+  APPS_TUNNEL_URL_KEYWORDS: ""
+  STATIC_URL: /dashboard/
+  SKIP_SOURCEMAPS: "true"
+  API_URL: https://api.shop.kfkasimir.dk/graphql/
+
+---
+apiVersion: v1
+kind: ConfigMap
+metadata:
   name: saleor-backend-env
 data:
   CELERY_BROKER_URL: redis://saleor-redis:6379/1
@@ -145,10 +173,10 @@ data:
   PUBLIC_URL: https://api.shop.kfkasimir.dk/
   PLAYGROUND_ENABLED: 'False'
   JAEGER_AGENT_HOST: saleor-jaeger
-  DASHBOARD_URL: https://dashboard.shop.kfkasimir.dk/
+  DASHBOARD_URL: https://dashboard.shop.kfkasimir.dk/dashboard/
   ALLOWED_HOSTS: .shop.kfkasimir.dk,saleor-storefront,localhost
-  MEDIA_URL: /app/media/
-  STATIC_URL: /app/static/
+  MEDIA_URL: /media/
+  STATIC_URL: /static/
 
 # ---
 # apiVersion: v1
@@ -443,8 +471,21 @@ spec:
         image: busybox:1.28
         command: ['sh', '-c', 'for i in {1..100}; do sleep 1; if nslookup saleor-mailpit; then exit 0; fi; done; exit 1']
       containers:
+      - name: media
+        image: nginx:latest
+        ports:
+        - name: media
+          containerPort: 80
+        volumeMounts:
+        - name: saleor-media
+          mountPath: /usr/share/nginx/html/media
+          subPath: media
+        resources:
+          limits:
+            cpu: '25m'
+            memory: '32Mi'
       - name: api
-        image: ghcr.io/saleor/saleor:3.18
+        image: olwimo/saleor-core:latest
         ports:
         - name: api
           containerPort: 8000
@@ -474,7 +515,7 @@ spec:
             cpu: '750m'
             memory: '896Mi'
       - name: worker
-        image: ghcr.io/saleor/saleor:3.18
+        image: olwimo/saleor-core:latest
         command: ['celery', '-A', 'saleor', '--app=saleor.celeryconf:app', 'worker', '--loglevel=info', '-B']
         envFrom:
         - configMapRef:
@@ -508,6 +549,10 @@ spec:
     port: 8000
     protocol: TCP
     targetPort: 8000
+  - name: media
+    port: 80
+    protocol: TCP
+    targetPort: 80
 
 ---
 apiVersion: apps/v1
@@ -531,20 +576,23 @@ spec:
         command: ['sh', '-c', 'for i in {1..100}; do sleep 1; if nslookup saleor-platform; then exit 0; fi; done; exit 1']
       containers:
       - name: dashboard
-        image: ghcr.io/saleor/saleor-dashboard:latest
+        image: olwimo/saleor-dashboard:latest
         ports:
         - name: dashboard
           containerPort: 80
         # restartPolicy: OnFailure
-        env:
-        # - name: API_URI
-        #   value: https://shop.kfkasimir.dk/graphql/
-        - name: API_URL
-          value: https://api.shop.kfkasimir.dk/graphql/
-        # - name: APP_MOUNT_URI
-        #   value: /dashboard/
-        # - name: STATIC_URL
-        #   value: https://shop.kfkasimir.dk/dashboard/
+        envFrom:
+        - configMapRef:
+            name: saleor-dashboard-env
+        # env:
+        # # - name: API_URI
+        # #   value: https://shop.kfkasimir.dk/graphql/
+        # - name: API_URL
+        #   value: https://api.shop.kfkasimir.dk/graphql/
+        # # - name: APP_MOUNT_URI
+        # #   value: /dashboard/
+        # # - name: STATIC_URL
+        # #   value: https://shop.kfkasimir.dk/dashboard/
         resources:
           limits:
             cpu: '25m'
