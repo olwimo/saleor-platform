@@ -3,27 +3,6 @@ kind: ConfigMap
 metadata:
   name: platform-conf
 data:
-  # media.conf: |
-  #   user nginx;
-  #   worker_processes 1;
-  #   events {
-  #     worker_connections 10240;
-  #   }
-
-  #   http {
-  #       server {
-  #           listen 80;
-
-  #           server_name localhost;
-  #           root /usr/share/nginx/html;
-  #           # index index.html index.htm;
-  #           server_tokens off;
-
-  #           location / {
-  #               try_files $uri $uri/ =404;
-  #           }
-  #       }
-  #   }
   router.conf: |
     user nginx;
     worker_processes 1;
@@ -32,10 +11,6 @@ data:
     }
 
     http {
-        # upstream media {
-        #     server saleor-platform:80;
-        # }
-
         upstream api {
             server saleor-platform:8000;
         }
@@ -58,16 +33,6 @@ data:
 
             ssl_certificate /etc/nginx/ssl/selfsigned.crt;
             ssl_certificate_key /etc/nginx/ssl/selfsigned.key;
-
-            # location /media/ {
-            #     proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;
-            #     proxy_set_header X-Forwarded-Proto https;
-            #     proxy_set_header X-Forwarded-Ssl on;
-            #     proxy_set_header Host $http_host;
-            #     proxy_redirect off;
-            #     proxy_pass http://media;
-            #     proxy_cookie_path / "/; HTTPOnly; Secure";
-            # }
 
             location / {
                 proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;
@@ -225,6 +190,7 @@ spec:
         volumeMounts:
         - name: saleor-db
           mountPath: /var/lib/postgresql/data
+          subPath: db
         - name: sql-conf
           mountPath: /docker-entrypoint-initdb.d/replica_user.sql
           subPath: replica_user.sql
@@ -246,9 +212,8 @@ spec:
           - key: replica_user.sql
             path: replica_user.sql
       - name: saleor-db
-        emptyDir:
-          sizeLimit: 500Mi
-
+        persistentVolumeClaim:
+          claimName: nfs-volume
 ---
 apiVersion: v1
 kind: Service
@@ -291,15 +256,15 @@ spec:
         volumeMounts:
         - name: saleor-redis
           mountPath: /data
+          subPath: redis
         resources:
           limits:
             cpu: '25m'
             memory: '32Mi'
       volumes:
       - name: saleor-redis
-        emptyDir:
-          sizeLimit: 500Mi
-
+        persistentVolumeClaim:
+          claimName: nfs-volume
 ---
 apiVersion: v1
 kind: Service
@@ -478,22 +443,6 @@ spec:
         image: busybox:1.28
         command: ['sh', '-c', 'for i in {1..100}; do sleep 1; if nslookup saleor-mailpit; then exit 0; fi; done; exit 1']
       containers:
-      # - name: media
-      #   image: nginx:latest
-      #   ports:
-      #   - name: media
-      #     containerPort: 80
-      #   volumeMounts:
-      #   - name: media-conf
-      #     mountPath: /etc/nginx/nginx.conf
-      #     subPath: media.conf
-      #     readOnly: true
-      #   - name: saleor-media
-      #     mountPath: /usr/share/nginx/html/media
-      #   resources:
-      #     limits:
-      #       cpu: '25m'
-      #       memory: '32Mi'
       - name: api
         image: ghcr.io/saleor/saleor:3.18
         ports:
@@ -505,6 +454,7 @@ spec:
         volumeMounts:
         - name: saleor-media
           mountPath: /app/media
+          subPath: media
         envFrom:
         - configMapRef:
             name: common-env
@@ -536,21 +486,15 @@ spec:
         volumeMounts:
         - name: saleor-media
           mountPath: /app/media
+          subPath: media
         resources:
           limits:
             cpu: '750m'
             memory: '896Mi'
       volumes:
-      # - name: media-conf
-      #   configMap:
-      #     name: platform-conf
-      #     items:
-      #     - key: media.conf
-      #       path: media.conf
       - name: saleor-media
-        emptyDir:
-          sizeLimit: 500Mi
-
+        persistentVolumeClaim:
+          claimName: nfs-volume
 ---
 apiVersion: v1
 kind: Service
@@ -560,10 +504,6 @@ spec:
   selector:
     app: saleor-platform
   ports:
-  # - name: media
-  #   port: 80
-  #   protocol: TCP
-  #   targetPort: 80
   - name: api
     port: 8000
     protocol: TCP
@@ -753,3 +693,108 @@ spec:
     protocol: TCP
     targetPort: 443
     nodePort: 30008
+
+---
+
+kind: Service
+apiVersion: v1
+metadata:
+  name: nfs-server
+spec:
+  type: LoadBalancer
+  ports:
+    - name: nfs
+      port: 2049
+    - name: mountd
+      port: 20048
+    - name: rpcbind
+      port: 111
+  selector:
+    role: nfs-server
+
+---
+apiVersion: v1
+kind: PersistentVolume
+metadata:
+  name: nfs-data-pv
+  labels:
+    name: nfs-pv
+spec:
+  storageClassName: "nfs-data-storageclass"
+  capacity:
+    storage: 1Gi
+  accessModes:
+    - ReadWriteOnce
+  gcePersistentDisk:
+    pdName: "nfs-data-disk"
+    fsType: "ext4"
+
+---
+
+kind: PersistentVolumeClaim
+apiVersion: v1
+metadata:
+  name: nfs-data-pvc
+spec:
+  storageClassName: "nfs-data-storageclass"
+  accessModes:
+    - ReadWriteOnce
+  resources:
+    requests:
+      storage: 1Gi
+
+---
+
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: nfs-server-conf
+data:
+  share : |-
+    /exports *(rw,fsid=0,insecure,no_root_squash)
+
+---
+
+apiVersion: v1
+kind: ReplicationController
+metadata:
+  name: nfs-server
+spec:
+  replicas: 1
+  selector:
+    role: nfs-server
+  template:
+    metadata:
+      labels:
+        role: nfs-server
+    spec:
+      containers:
+      - name: nfs-server
+        image: k8s.gcr.io/volume-nfs:0.8
+        # image: alphayax/docker-volume-nfs:latest
+        imagePullPolicy: Always
+        ports:
+        - name: nfs
+          containerPort: 2049
+        - name: mountd
+          containerPort: 20048
+        - name: rpcbind
+          containerPort: 111
+        securityContext:
+          privileged: true
+        volumeMounts:
+        - name: nfs-data-pvc
+          mountPath: /exports
+        - name: nfs-server-conf
+          mountPath: /etc/exports.d/
+        resources:
+          limits:
+            cpu: '125m'
+            memory: '128Mi'
+      volumes:
+      - name: nfs-data-pvc
+        persistentVolumeClaim:
+          claimName: nfs-data-pvc
+      - name: nfs-server-conf
+        configMap:
+          name: nfs-server-conf

@@ -3,27 +3,27 @@ kind: ConfigMap
 metadata:
   name: platform-conf
 data:
-  # media.conf: |
-  #   user nginx;
-  #   worker_processes 1;
-  #   events {
-  #     worker_connections 10240;
-  #   }
+  media.conf: |
+    user nginx;
+    worker_processes 1;
+    events {
+      worker_connections 10240;
+    }
 
-  #   http {
-  #       server {
-  #           listen 80;
+    http {
+        server {
+            listen 80;
 
-  #           server_name localhost;
-  #           root /usr/share/nginx/html;
-  #           # index index.html index.htm;
-  #           server_tokens off;
+            server_name localhost;
+            root /usr/share/nginx/html;
+            # index index.html index.htm;
+            server_tokens off;
 
-  #           location / {
-  #               try_files $uri $uri/ =404;
-  #           }
-  #       }
-  #   }
+            location / {
+                try_files $uri $uri/ =404;
+            }
+        }
+    }
   router.conf: |
     user nginx;
     worker_processes 1;
@@ -32,9 +32,9 @@ data:
     }
 
     http {
-        # upstream media {
-        #     server saleor-platform:80;
-        # }
+        upstream media {
+            server saleor-platform:80;
+        }
 
         upstream api {
             server saleor-platform:8000;
@@ -59,17 +59,31 @@ data:
             ssl_certificate /etc/nginx/ssl/selfsigned.crt;
             ssl_certificate_key /etc/nginx/ssl/selfsigned.key;
 
-            # location /media/ {
-            #     proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;
-            #     proxy_set_header X-Forwarded-Proto https;
-            #     proxy_set_header X-Forwarded-Ssl on;
-            #     proxy_set_header Host $http_host;
-            #     proxy_redirect off;
-            #     proxy_pass http://media;
-            #     proxy_cookie_path / "/; HTTPOnly; Secure";
-            # }
+            location /media/ {
+                proxy_set_header X-Real-Ip $remote_addr;
+                proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;
+                proxy_set_header X-Forwarded-Proto https;
+                proxy_set_header X-Forwarded-Ssl on;
+                proxy_set_header Host $http_host;
+                proxy_redirect off;
+                proxy_pass http://media;
+                proxy_cookie_path / "/; HTTPOnly; Secure";
+            }
 
             location / {
+                add_header 'Access-Control-Allow-Origin' 'https://*.shop.kfkasimir.dk,https://shop.kfkasimir.dk';
+                add_header 'Access-Control-Allow-Credentials' 'true';
+                add_header 'Access-Control-Allow-Headers' 'Authorization,Accept,Origin,DNT,X-CustomHeader,Keep-Alive,User-Agent,X-Requested-With,If-Modified-Since,Cache-Control,Content-Type,Content-Range,Range';
+                add_header 'Access-Control-Allow-Methods' 'GET,POST,OPTIONS,PUT,DELETE,PATCH';
+
+                if ($request_method = 'OPTIONS') {
+                    add_header 'Access-Control-Max-Age' 1728000;
+                    add_header 'Content-Type' 'text/plain charset=UTF-8';
+                    add_header 'Content-Length' 0;
+                    return 204;
+                }
+
+                proxy_set_header X-Real-Ip $remote_addr;
                 proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;
                 proxy_set_header X-Forwarded-Proto https;
                 proxy_set_header X-Forwarded-Ssl on;
@@ -92,6 +106,7 @@ data:
             ssl_certificate_key /etc/nginx/ssl/selfsigned.key;
 
             location / {
+                proxy_set_header X-Real-Ip $remote_addr;
                 proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;
                 proxy_set_header X-Forwarded-Proto https;
                 proxy_set_header X-Forwarded-Ssl on;
@@ -114,6 +129,7 @@ data:
             ssl_certificate_key /etc/nginx/ssl/selfsigned.key;
 
             location / {
+                proxy_set_header X-Real-Ip $remote_addr;
                 proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;
                 proxy_set_header X-Forwarded-Proto https;
                 proxy_set_header X-Forwarded-Ssl on;
@@ -171,8 +187,7 @@ data:
   DATABASE_URL: postgres://saleor:saleor@saleor-db/saleor
   DEFAULT_FROM_EMAIL: it@kfkasimir.dk
   EMAIL_URL: smtp://saleor-mailpit:1025
-  ALLOWED_CLIENT_HOSTS: https://dashboard.shop.kfkasimir.dk,https://shop.kfkasimir.dk
-  # ALLOWED_GRAPHQL_ORIGINS: https://api.shop.kfkasimir.dk
+  ALLOWED_CLIENT_HOSTS: localhost,*.shop.kfkasimir.dk,shop.kfkasimir.dk,192.168.200.11
   REDIS_URL: redis://saleor-redis:6379/0
   DEBUG: 'False'
   DEFAULT_COUNTRY: DK
@@ -181,9 +196,7 @@ data:
   PLAYGROUND_ENABLED: 'False'
   JAEGER_AGENT_HOST: saleor-jaeger
   DASHBOARD_URL: https://dashboard.shop.kfkasimir.dk/
-  ALLOWED_HOSTS: .shop.kfkasimir.dk,saleor-storefront,localhost
-  MEDIA_URL: /app/media/
-  STATIC_URL: /app/static/
+  ALLOWED_HOSTS: localhost,*.shop.kfkasimir.dk,shop.kfkasimir.dk,192.168.200.11
 
 # ---
 # apiVersion: v1
@@ -478,22 +491,22 @@ spec:
         image: busybox:1.28
         command: ['sh', '-c', 'for i in {1..100}; do sleep 1; if nslookup saleor-mailpit; then exit 0; fi; done; exit 1']
       containers:
-      # - name: media
-      #   image: nginx:latest
-      #   ports:
-      #   - name: media
-      #     containerPort: 80
-      #   volumeMounts:
-      #   - name: media-conf
-      #     mountPath: /etc/nginx/nginx.conf
-      #     subPath: media.conf
-      #     readOnly: true
-      #   - name: saleor-media
-      #     mountPath: /usr/share/nginx/html/media
-      #   resources:
-      #     limits:
-      #       cpu: '25m'
-      #       memory: '32Mi'
+      - name: media
+        image: nginx:latest
+        ports:
+        - name: media
+          containerPort: 80
+        volumeMounts:
+        - name: media-conf
+          mountPath: /etc/nginx/nginx.conf
+          subPath: media.conf
+          readOnly: true
+        - name: saleor-media
+          mountPath: /usr/share/nginx/html/media
+        resources:
+          limits:
+            cpu: '25m'
+            memory: '32Mi'
       - name: api
         image: ghcr.io/saleor/saleor:3.18
         ports:
@@ -541,12 +554,12 @@ spec:
             cpu: '750m'
             memory: '896Mi'
       volumes:
-      # - name: media-conf
-      #   configMap:
-      #     name: platform-conf
-      #     items:
-      #     - key: media.conf
-      #       path: media.conf
+      - name: media-conf
+        configMap:
+          name: platform-conf
+          items:
+          - key: media.conf
+            path: media.conf
       - name: saleor-media
         emptyDir:
           sizeLimit: 500Mi
@@ -560,10 +573,10 @@ spec:
   selector:
     app: saleor-platform
   ports:
-  # - name: media
-  #   port: 80
-  #   protocol: TCP
-  #   targetPort: 80
+  - name: media
+    port: 80
+    protocol: TCP
+    targetPort: 80
   - name: api
     port: 8000
     protocol: TCP

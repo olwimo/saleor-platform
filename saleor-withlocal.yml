@@ -1,29 +1,8 @@
 apiVersion: v1
 kind: ConfigMap
 metadata:
-  name: platform-conf
+  name: saleor-platform-conf
 data:
-  # media.conf: |
-  #   user nginx;
-  #   worker_processes 1;
-  #   events {
-  #     worker_connections 10240;
-  #   }
-
-  #   http {
-  #       server {
-  #           listen 80;
-
-  #           server_name localhost;
-  #           root /usr/share/nginx/html;
-  #           # index index.html index.htm;
-  #           server_tokens off;
-
-  #           location / {
-  #               try_files $uri $uri/ =404;
-  #           }
-  #       }
-  #   }
   router.conf: |
     user nginx;
     worker_processes 1;
@@ -32,10 +11,6 @@ data:
     }
 
     http {
-        # upstream media {
-        #     server saleor-platform:80;
-        # }
-
         upstream api {
             server saleor-platform:8000;
         }
@@ -58,16 +33,6 @@ data:
 
             ssl_certificate /etc/nginx/ssl/selfsigned.crt;
             ssl_certificate_key /etc/nginx/ssl/selfsigned.key;
-
-            # location /media/ {
-            #     proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;
-            #     proxy_set_header X-Forwarded-Proto https;
-            #     proxy_set_header X-Forwarded-Ssl on;
-            #     proxy_set_header Host $http_host;
-            #     proxy_redirect off;
-            #     proxy_pass http://media;
-            #     proxy_cookie_path / "/; HTTPOnly; Secure";
-            # }
 
             location / {
                 proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;
@@ -149,7 +114,7 @@ data:
 apiVersion: v1
 kind: ConfigMap
 metadata:
-  name: common-env
+  name: saleor-common-env
 data:
   DEFAULT_CHANNEL_SLUG: default-channel
   # Note: recommended value is False for production usage,
@@ -165,7 +130,7 @@ data:
 apiVersion: v1
 kind: ConfigMap
 metadata:
-  name: backend-env
+  name: saleor-backend-env
 data:
   CELERY_BROKER_URL: redis://saleor-redis:6379/1
   DATABASE_URL: postgres://saleor:saleor@saleor-db/saleor
@@ -189,7 +154,7 @@ data:
 # apiVersion: v1
 # kind: Secret
 # metadata:
-#   name: secret-key
+#   name: saleor-secret-key
 # type: Opaque
 # data:
 #   # SECRET_KEY: changeme
@@ -225,6 +190,7 @@ spec:
         volumeMounts:
         - name: saleor-db
           mountPath: /var/lib/postgresql/data
+          subPath: db
         - name: sql-conf
           mountPath: /docker-entrypoint-initdb.d/replica_user.sql
           subPath: replica_user.sql
@@ -241,14 +207,13 @@ spec:
       volumes:
       - name: sql-conf
         configMap:
-          name: platform-conf
+          name: saleor-platform-conf
           items:
           - key: replica_user.sql
             path: replica_user.sql
       - name: saleor-db
-        emptyDir:
-          sizeLimit: 500Mi
-
+        persistentVolumeClaim:
+          claimName: local-data-pvc
 ---
 apiVersion: v1
 kind: Service
@@ -291,15 +256,15 @@ spec:
         volumeMounts:
         - name: saleor-redis
           mountPath: /data
+          subPath: redis
         resources:
           limits:
             cpu: '25m'
             memory: '32Mi'
       volumes:
       - name: saleor-redis
-        emptyDir:
-          sizeLimit: 500Mi
-
+        persistentVolumeClaim:
+          claimName: local-data-pvc
 ---
 apiVersion: v1
 kind: Service
@@ -478,22 +443,6 @@ spec:
         image: busybox:1.28
         command: ['sh', '-c', 'for i in {1..100}; do sleep 1; if nslookup saleor-mailpit; then exit 0; fi; done; exit 1']
       containers:
-      # - name: media
-      #   image: nginx:latest
-      #   ports:
-      #   - name: media
-      #     containerPort: 80
-      #   volumeMounts:
-      #   - name: media-conf
-      #     mountPath: /etc/nginx/nginx.conf
-      #     subPath: media.conf
-      #     readOnly: true
-      #   - name: saleor-media
-      #     mountPath: /usr/share/nginx/html/media
-      #   resources:
-      #     limits:
-      #       cpu: '25m'
-      #       memory: '32Mi'
       - name: api
         image: ghcr.io/saleor/saleor:3.18
         ports:
@@ -505,13 +454,14 @@ spec:
         volumeMounts:
         - name: saleor-media
           mountPath: /app/media
+          subPath: media
         envFrom:
         - configMapRef:
-            name: common-env
+            name: saleor-common-env
         - configMapRef:
-            name: backend-env
+            name: saleor-backend-env
         - secretRef:
-            name: secret-key
+            name: saleor-secret-key
         # env:
         # - name: JAEGER_AGENT_HOST
         #   value: jaeger
@@ -528,29 +478,23 @@ spec:
         command: ['celery', '-A', 'saleor', '--app=saleor.celeryconf:app', 'worker', '--loglevel=info', '-B']
         envFrom:
         - configMapRef:
-            name: common-env
+            name: saleor-common-env
         - configMapRef:
-            name: backend-env
+            name: saleor-backend-env
         - secretRef:
-            name: secret-key
+            name: saleor-secret-key
         volumeMounts:
         - name: saleor-media
           mountPath: /app/media
+          subPath: media
         resources:
           limits:
             cpu: '750m'
             memory: '896Mi'
       volumes:
-      # - name: media-conf
-      #   configMap:
-      #     name: platform-conf
-      #     items:
-      #     - key: media.conf
-      #       path: media.conf
       - name: saleor-media
-        emptyDir:
-          sizeLimit: 500Mi
-
+        persistentVolumeClaim:
+          claimName: local-data-pvc
 ---
 apiVersion: v1
 kind: Service
@@ -560,10 +504,6 @@ spec:
   selector:
     app: saleor-platform
   ports:
-  # - name: media
-  #   port: 80
-  #   protocol: TCP
-  #   targetPort: 80
   - name: api
     port: 8000
     protocol: TCP
@@ -725,7 +665,7 @@ spec:
       volumes:
       - name: router-conf
         configMap:
-          name: platform-conf
+          name: saleor-platform-conf
           items:
           - key: router.conf
             path: router.conf
@@ -753,3 +693,47 @@ spec:
     protocol: TCP
     targetPort: 443
     nodePort: 30008
+
+---
+apiVersion: storage.k8s.io/v1
+kind: StorageClass
+metadata:
+  name: local-storage
+provisioner: kubernetes.io/no-provisioner
+volumeBindingMode: WaitForFirstConsumer
+
+---
+apiVersion: v1
+kind: PersistentVolume
+metadata:
+  name: local-data-pv
+spec:
+  capacity:
+    storage: 10Gi
+  accessModes:
+  - ReadWriteOnce
+  persistentVolumeReclaimPolicy: Retain
+  storageClassName: local-storage
+  local:
+    path: /data/debian/volumes/pv1
+  nodeAffinity:
+    required:
+      nodeSelectorTerms:
+      - matchExpressions:
+        - key: kubernetes.io/hostname
+          operator: In
+          values:
+          - debian
+
+---
+kind: PersistentVolumeClaim
+apiVersion: v1
+metadata:
+  name: local-data-pvc
+spec:
+  accessModes:
+    - ReadWriteOnce
+  storageClassName: local-storage
+  resources:
+    requests:
+      storage: 10Gi
