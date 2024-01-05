@@ -16,7 +16,7 @@ data:
         }
 
         upstream media {
-            server saleor-platform:80;
+            server saleor-media:80;
         }
 
         upstream dashboard {
@@ -445,6 +445,55 @@ spec:
 apiVersion: apps/v1
 kind: Deployment
 metadata:
+  name: saleor-media
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: saleor-media
+  template:
+    metadata:
+      labels:
+        app: saleor-media
+    spec:
+      # restartPolicy: OnFailure
+      containers:
+      - name: media
+        image: nginx:latest
+        ports:
+        - name: media
+          containerPort: 80
+        volumeMounts:
+        - name: saleor-media
+          mountPath: /usr/share/nginx/html/media
+          subPath: media
+        resources:
+          limits:
+            cpu: '25m'
+            memory: '32Mi'
+      volumes:
+      - name: saleor-media
+        persistentVolumeClaim:
+          claimName: local-data-pvc
+
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: saleor-media
+spec:
+  selector:
+    app: saleor-media
+  ports:
+  - name: media
+    port: 80
+    protocol: TCP
+    targetPort: 80
+
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
   name: saleor-platform
 spec:
   replicas: 1
@@ -470,20 +519,10 @@ spec:
       - name: init-mailpit
         image: busybox:1.28
         command: ['sh', '-c', 'for i in {1..100}; do sleep 1; if nslookup saleor-mailpit; then exit 0; fi; done; exit 1']
+      - name: init-media
+        image: busybox:1.28
+        command: ['sh', '-c', 'for i in {1..100}; do sleep 1; if nslookup saleor-media; then exit 0; fi; done; exit 1']
       containers:
-      - name: media
-        image: nginx:latest
-        ports:
-        - name: media
-          containerPort: 80
-        volumeMounts:
-        - name: saleor-media
-          mountPath: /usr/share/nginx/html/media
-          subPath: media
-        resources:
-          limits:
-            cpu: '25m'
-            memory: '32Mi'
       - name: api
         image: olwimo/saleor-core:latest
         ports:
@@ -536,6 +575,7 @@ spec:
       - name: saleor-media
         persistentVolumeClaim:
           claimName: local-data-pvc
+
 ---
 apiVersion: v1
 kind: Service
@@ -549,10 +589,6 @@ spec:
     port: 8000
     protocol: TCP
     targetPort: 8000
-  - name: media
-    port: 80
-    protocol: TCP
-    targetPort: 80
 
 ---
 apiVersion: apps/v1
